@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DODO Flash Loan Arbitrage</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <style>
+    body {
+      background-color: #0a0;
+      color: white;
+      font-family: sans-serif;
+      padding: 20px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 20px;
+    }
+    th, td {
+      padding: 8px 12px;
+      border: 1px solid #444;
+      text-align: center;
+    }
+    .profitable {
+      background-color: #00ff00;
+      color: black;
+      font-weight: bold;
+    }
+    #log {
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid #444;
+      margin-top: 10px;
+      padding: 10px;
+      background: #111;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    button {
+      padding: 8px 16px;
+      margin: 5px;
+      background: #333;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #555;
+    }
+    .control-group {
+      margin: 10px 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 15px;
+    }
+    .control-group label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .profit-display {
+      font-size: 1.2em;
+      font-weight: bold;
+      margin: 10px 0;
+      padding: 8px;
+      background: #333;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>DODO Flash Loan Arbitrage</h1>
+
+  <p><strong>Wallet:</strong> <span id="wallet">Not connected</span></p>
+  <p><strong>Wallet USDC Balance:</strong> <span id="walletBalance">-</span></p>
+  <p><strong>Contract USDC Balance:</strong> <span id="contractBalance">-</span></p>
+
+  <div class="profit-display">
+    <strong>Accumulated Profit:</strong> <span id="accumulatedProfit">0.00</span> USDC
+  </div>
+
+  <div class="control-group">
+    <button id="connectWallet">Connect Wallet</button>
+    <button id="scanNow">Scan Now</button>
+    <button id="withdrawUSDC">Withdraw USDC</button>
+  </div>
+
+  <div class="control-group">
+    <label><input type="checkbox" id="autoTradeToggle" /> Auto Trade</label>
+    <label><input type="checkbox" id="backgroundTradeToggle" /> Auto Trade in Background</label>
+    <label><input type="checkbox" id="accumulateToggle" /> Let profits accumulate in contract</label>
+    <label><input type="checkbox" id="positiveBalanceToggle" checked /> Only trade if contract balance increases</label>
+  </div>
+
+  <div class="control-group">
+    <label>Min Profit %: <input type="number" id="minProfitPct" value="0.2" step="0.1" min="0.1" />%</label>
+    <label>Trade Amount: <input type="number" id="tradeAmount" value="10" min="1" /> USDC</label>
+    <label>Slippage %: <input type="number" id="slippagePct" value="0" step="0.1" min="0" /></label>
+  </div>
+
+  <div class="control-group">
+    <label>Batch Amount (0–100): <input type="number" id="batchAmount" value="1" min="0" max="100" step="1" /></label>
+    <label>Gas Limit (e.g. 1000000): <input type="number" id="gasLimit" value="1000000" min="21000" step="1000" /></label>
+  </div>
+
+  <table id="resultTable">
+    <thead>
+      <tr>
+        <th>Token</th>
+        <th>Buy Router</th>
+        <th>Sell Router</th>
+        <th>Buy Price</th>
+        <th>Sell Price</th>
+        <th>Profit $</th>
+        <th>Profit %</th>
+        <th>Status</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="results"></tbody>
+  </table>
+
+  <div id="log"></div>
+
+<script>
+(async () => {
+
+  // DODO Flash Loan Arbitrage Contract
+  const contractAddress = "0x98FA2A393Bf5C297FE29E160B244b560a61d9976";
+  const contractABI = [
+    // ... your original ABI here ...
+    // For demo, minimal interface with these functions:
+    {
+      "inputs": [{"internalType":"uint256","name":"amount","type":"uint256"}],
+      "name":"withdraw",
+      "outputs":[],
+      "stateMutability":"nonpayable",
+      "type":"function"
+    },
+    {
+      "inputs":[],
+      "name":"getContractBalance",
+      "outputs":[{"internalType":"uint256","name":"","type":"uint256"}],
+      "stateMutability":"view",
+      "type":"function"
+    },
+    {
+      "inputs":[],
+      "name":"accumulatedProfit",
+      "outputs":[{"internalType":"uint256","name":"","type":"uint256"}],
+      "stateMutability":"view",
+      "type":"function"
+    },
+    {
+      "inputs":[],
+      "name":"trade",
+      "outputs":[],
+      "stateMutability":"nonpayable",
+      "type":"function"
+    }
+  ];
+
+  // Token list with duplicates removed and fixes:
+  const tokens = {
+    WETH: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+    DAI: "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
+    WBTC: "0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6",
+    SHIB: "0x6f8A06447ff6fcf75A5fCdb3f8c4BAb2da4fC0D0",
+    UNI: "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
+    USDT: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+    USDC: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    WPOL: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+    AAVE: "0xD6DF932A45C0f255f85145f286eA0b292B21C90B",
+    LINK: "0x53e0bca35ec356bd5dddfebbd1fc0fd03fabad39",
+    RNDR: "0x6C3c7886B43D005dB8c28a09e8038B87E36Cf26c",
+    LDO: "0xBb0bB78BEEEA5cF201b8f2651F48830E64CE45a4",
+    XSGD: "0x70e8dE73cE022F373d5A9F00b0eC0cF5835B0fC0",
+    axlUSDC: "0x2a2B6055a5C6945F4fE0E814F5D4A13B5A681159",
+    TRADE: "0x82362Ec182Db3Cf7829014Bc61E9BE8a2e82868a",
+    CRV: "0x172370d5Cd63279eFa6d502DAB29171933a610AF",
+    SURE: "0xF638a9594C0c780D6C8bC40Fa33EFB0CEabf5d57",
+    MaticX: "0xa3Fa99A148fA48D14Ed51d610c367C61876997F1",
+    KLIMA: "0x4e78011ce80ee02d2c3e649fb657e45898257815",
+    SUSHI: "0x0b3F868E0BE5597D5DB7fEB59E1CADBb0fCfa5d",
+    QUICK: "0x831753DD7087CaC61aB5644b308642cc1c33Dc13",
+    APE: "0x4d224452801ACEd8B2F0aebE155379bb5D594381",
+    DPI: "0x1494CA1F11D487c2bBe4543E90080AeBa4BA3C2b",
+    FND: "0x292c4EeFDDa27062049d44d4730D5Fe774B5f4c7",
+    BONE: "0xAD37e3433EBde20E5fBf531e6C7dA1655c60Bb8E",
+    OS: "0xD3A691C852CDB01E281545A27064741F0B7f6825",
+    SHIKIGON: "0x3F0fB6e42D160A8DEF49fE68b8eF4D8a5B7AB119",
+    THE7: "0x045F7Ffdcc8334e78316a2c1164EFb2e5f3815d5",
+    BETA: "0x0AfAAbCAd8815B32bF2B64e0Dc5E1df2f1454CDE",
+    FREE: "0xE1ae4d4A3A2200AE5ac06E50BCA0DD7E52A19238"
+  };
+
+  // Router list deduped, corrected:
+  const routers = {
+    QuickSwap: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
+    SushiSwap: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506",
+    Dfyn: "0xA8b607Aa09B6A2641cF6F90f643E76d3f6e6Ff73",
+    CafeSwap: "0x9055682E58C74fc8DdBFC55Ad2428aB1F96098Fc",
+    UniswapV3: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    Curve: "0xC25a3A3b969415c80451098fa907EC722572917F",
+    Dodo: "0x50f3752289e1456B81901e14b0ddb308b0e69c9c",
+    mStable: "0x2A306D048f0C4E2Dde6456d76bf5A51E815e88d8",
+    Cometh: "0x93C4cE5C2873349E6EeDaF9A8BE1885728070D3C",
+    KyberSwap: "0x5649b4dd00780e99bab7abb4a3d581ea1aeb23d0",
+    Balancer: "0x056Fd409E1d7A124BD7017459dFEa2F387b6d5Cd",
+    PancakeSwap: "0x7a597a1cD7Acd3fF82Ae0F1d0b0d09bA40D8D6e3",
+    JetSwap: "0x5C6EC38fb0e2609672BDf628B1fD605A523E5923",
+    KyberElastic: "0xF9c2b5746c946EF883ab2660BbbB1f10A5bdeAb4",
+    SushiX: "0xd08b5f3e89f1e2d6b067e0a0cbdb094e6e41e77c",
+    ApeSwap: "0xC0788A3aD43d79aa53B09c2EaCc313A787d1d607",
+    Firebird: "0x8E365e6d8B1Ae01F4b2a8E2aD7611e6236260b62",
+    WaultSwap: "0xa98ad5cCC946E3E7Cfb7dfe1AE8eA014B4B49Bdb",
+    Polycat: "0x94930a328162957FF1dd48900aF67B5439336cBD",
+    Elk: "0x5E32d6C73A304A3aAd95cB91Eb34C01567e2e6a7"
+  };
+
+  // --- Setup ethers ---
+  let provider;
+  let signer;
+  let userAddress;
+  let contract;
+
+  // Cache for token decimals, key = token address (lowercase)
+  const tokenDecimals = {};
+
+  // USDC decimals fixed (Polygon USDC is 6 decimals)
+  const USDC_DECIMALS = 6;
+
+  // Minimal ERC20 ABI to get decimals and balanceOf
+  const ERC20_ABI = [
+    "function decimals() view returns (uint8)",
+    "function balanceOf(address) view returns (uint256)"
+  ];
+
+  // Initialize DOM elements
+  const walletSpan = document.getElementById("wallet");
+  const walletBalanceSpan = document.getElementById("walletBalance");
+  const contractBalanceSpan = document.getElementById("contractBalance");
+  const accumulatedProfitSpan = document.getElementById("accumulatedProfit");
+  const connectWalletBtn = document.getElementById("connectWallet");
+  const scanNowBtn = document.getElementById("scanNow");
+  const withdrawUSDCBtn = document.getElementById("withdrawUSDC");
+  const resultsTbody = document.getElementById("results");
+  const logDiv = document.getElementById("log");
+
+  const autoTradeToggle = document.getElementById("autoTradeToggle");
+  const backgroundTradeToggle = document.getElementById("backgroundTradeToggle");
+  const accumulateToggle = document.getElementById("accumulateToggle");
+  const positiveBalanceToggle = document.getElementById("positiveBalanceToggle");
+  const minProfitPctInput = document.getElementById("minProfitPct");
+  const tradeAmountInput = document.getElementById("tradeAmount");
+  const slippagePctInput = document.getElementById("slippagePct");
+  const batchAmountInput = document.getElementById("batchAmount");
+  const gasLimitInput = document.getElementById("gasLimit");
+
+  // Helper: log messages to #log div with timestamp
+  function log(message) {
+    const now = new Date().toLocaleTimeString();
+    logDiv.innerText = `[${now}] ${message}\n` + logDiv.innerText;
+  }
+
+  // Connect wallet
+  async function connectWallet() {
+    if (!window.ethereum) {
+      alert("MetaMask not detected");
+      return;
+    }
+    provider = new ethers.providers.Web3Provider(window.ethereum);
+    await provider.send("eth_requestAccounts", []);
+    signer = provider.getSigner();
+    userAddress = await signer.getAddress();
+    walletSpan.innerText = userAddress;
+    contract = new ethers.Contract(contractAddress, contractABI, signer);
+    await updateBalances();
+    log("Wallet connected: " + userAddress);
+  }
+
+  // Update wallet and contract balances
+  async function updateBalances() {
+    if (!signer) return;
+    try {
+      // Wallet USDC balance
+      const usdcContract = new ethers.Contract(tokens.USDC, ERC20_ABI, provider);
+      const bal = await usdcContract.balanceOf(userAddress);
+      walletBalanceSpan.innerText = ethers.utils.formatUnits(bal, USDC_DECIMALS);
+
+      // Contract USDC balance via contract call (assuming getContractBalance returns uint256)
+      if (contract) {
+        const contractBalRaw = await contract.getContractBalance();
+        contractBalanceSpan.innerText = ethers.utils.formatUnits(contractBalRaw, USDC_DECIMALS);
+        // Accumulated profit from contract
+        const accProfitRaw = await contract.accumulatedProfit();
+        accumulatedProfitSpan.innerText = ethers.utils.formatUnits(accProfitRaw, USDC_DECIMALS);
+      }
+    } catch (err) {
+      log("Balance update error: " + err);
+    }
+  }
+
+  // Get token decimals with caching
+  async function getTokenDecimals(tokenAddress) {
+    tokenAddress = tokenAddress.toLowerCase();
+    if (tokenDecimals[tokenAddress] !== undefined) {
+      return tokenDecimals[tokenAddress];
+    }
+    try {
+      const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+      const decimals = await tokenContract.decimals();
+      tokenDecimals[tokenAddress] = decimals;
+      return decimals;
+    } catch (err) {
+      log(`Failed to get decimals for ${tokenAddress}, defaulting to 18`);
+      tokenDecimals[tokenAddress] = 18; // fallback default
+      return 18;
+    }
+  }
+
+  // Main scan for arbitrage opportunities
+
+  }
+
+  // Helper: format BigNumber amount with token decimals, returns string
+  function formatTokenAmount(amountBN, decimals) {
+    return ethers.utils.formatUnits(amountBN, decimals);
+  }
+
+  // Helper: convert trade amount USDC input (number) to BigNumber with USDC decimals
+  function parseUSDCAmount(amount) {
+    return ethers.utils.parseUnits(amount.toString(), USDC_DECIMALS);
+  }
+
+  // Scan all token-router-router combos and compute arbitrage profit
+  async function scanArbitrage() {
+    if (!provider || !signer) {
+      log("Wallet not connected");
+      return;
+    }
+
+    resultsTbody.innerHTML = "";
+    const minProfitPct = parseFloat(minProfitPctInput.value) || 0.2;
+    const tradeAmount = parseFloat(tradeAmountInput.value) || 10;
+    const slippagePct = parseFloat(slippagePctInput.value) || 0;
+    const batchAmount = parseInt(batchAmountInput.value) || 1;
+
+    const amountInRaw = parseUSDCAmount(tradeAmount); // raw USDC amount (BigNumber)
+
+    log(`Scanning arbitrage with trade amount: ${tradeAmount} USDC, min profit: ${minProfitPct}%`);
+
+    // Prepare contract read-only for calls
+    contract = contract || new ethers.Contract(contractAddress, contractABI, signer);
+
+    // Store best opportunities for possible auto-trade
+    const profitableTrades = [];
+
+    const tokenKeys = Object.keys(tokens);
+    const routerKeys = Object.keys(routers);
+
+    // For each token (exclude USDC because we want token swaps)
+    for (const tokenKey of tokenKeys) {
+      if (tokenKey === "USDC") continue; // Skip USDC token itself
+
+      const tokenAddress = tokens[tokenKey];
+      const tokenDecimalsCount = await getTokenDecimals(tokenAddress);
+
+      // We'll calculate price via getAmountsOut for buy (USDC -> token) and sell (token -> USDC)
+      for (const buyRouterKey of routerKeys) {
+        for (const sellRouterKey of routerKeys) {
+          if (buyRouterKey === sellRouterKey) continue; // skip same router buy-sell pairs
+
+          const buyRouterAddress = routers[buyRouterKey];
+          const sellRouterAddress = routers[sellRouterKey];
+
+          try {
+            const buyRouterContract = new ethers.Contract(buyRouterAddress, [
+              "function getAmountsOut(uint256 amountIn, address[] calldata path) external view returns (uint256[] memory amounts)"
+            ], provider);
+
+            const sellRouterContract = new ethers.Contract(sellRouterAddress, [
+              "function getAmountsOut(uint256 amountIn, address[] calldata path) external view returns (uint256[] memory amounts)"
+            ], provider);
+
+            // Buy path: USDC -> Token
+            const buyPath = [tokens.USDC, tokenAddress];
+            const amountsOutBuy = await buyRouterContract.getAmountsOut(amountInRaw, buyPath);
+            const tokenAmountOutRaw = amountsOutBuy[1]; // amount of token bought
+
+            // Sell path: Token -> USDC
+            const sellPath = [tokenAddress, tokens.USDC];
+            const amountsOutSell = await sellRouterContract.getAmountsOut(tokenAmountOutRaw, sellPath);
+            const usdcAmountOutRaw = amountsOutSell[1]; // amount USDC received after selling
+
+            // Adjust sell amount by slippage if any
+            let slippageAdjustedUsdcOutRaw = usdcAmountOutRaw;
+            if (slippagePct > 0) {
+              const slippageFactor = (100 - slippagePct) / 100;
+              slippageAdjustedUsdcOutRaw = usdcAmountOutRaw.mul(ethers.utils.parseUnits(slippageFactor.toString(), 18)).div(ethers.utils.parseUnits("1", 18));
+            }
+
+            // Calculate profit in USDC raw and %
+            const profitRaw = slippageAdjustedUsdcOutRaw.sub(amountInRaw);
+            const profitFloat = parseFloat(ethers.utils.formatUnits(profitRaw, USDC_DECIMALS));
+            const profitPct = (profitFloat / tradeAmount) * 100;
+
+            // Prices for UI (buy and sell)
+            // buyPrice = USDC per token = input USDC / token amount out
+            const buyPrice = tradeAmount / parseFloat(formatTokenAmount(tokenAmountOutRaw, tokenDecimalsCount));
+            // sellPrice = USDC received / token amount sold = USDC per token after sell
+            const sellPrice = parseFloat(formatTokenAmount(slippageAdjustedUsdcOutRaw, USDC_DECIMALS)) / parseFloat(formatTokenAmount(tokenAmountOutRaw, tokenDecimalsCount));
+
+            // Prepare table row
+            const tr = document.createElement("tr");
+            if (profitPct >= minProfitPct) tr.classList.add("profitable");
+
+            tr.innerHTML = `
+              <td>${tokenKey}</td>
+              <td>${buyRouterKey}</td>
+              <td>${sellRouterKey}</td>
+              <td>${buyPrice.toFixed(6)}</td>
+              <td>${sellPrice.toFixed(6)}</td>
+              <td>${profitFloat.toFixed(6)}</td>
+              <td>${profitPct.toFixed(3)}%</td>
+              <td>${profitPct >= minProfitPct ? "🚨 Arbitrage" : "❌ Skip"}</td>
+              <td>
+                ${profitPct >= minProfitPct ? `<button class="trade-btn" data-token="${tokenAddress}" data-buyrouter="${buyRouterAddress}" data-sellrouter="${sellRouterAddress}" data-amount="${amountInRaw.toString()}">Trade</button>` : ""}
+              </td>
+            `;
+
+            resultsTbody.appendChild(tr);
+
+            // Save profitable trades for auto trade
+            if (profitPct >= minProfitPct) {
+              profitableTrades.push({
+                token: tokenAddress,
+                buyRouter: buyRouterAddress,
+                sellRouter: sellRouterAddress,
+                amountInRaw,
+                profitRaw,
+                profitPct,
+                tokenKey,
+                buyRouterKey,
+                sellRouterKey
+              });
+            }
+
+          } catch (err) {
+            log(`Error getting amounts for ${tokenKey} buy:${buyRouterKey} sell:${sellRouterKey}: ${err.message}`);
+          }
+        }
+      }
+    }
+
+    log(`Scan complete. Found ${profitableTrades.length} profitable trades.`);
+
+    // Auto trade if enabled
+    if (autoTradeToggle.checked && profitableTrades.length > 0) {
+      for (const tradeInfo of profitableTrades) {
+        try {
+          await executeTrade(tradeInfo);
+        } catch (err) {
+          log(`Trade execution failed: ${err.message}`);
+        }
+      }
+    }
+
+    await updateBalances();
+  }
+
+  // Execute trade by calling contract.trade() with parameters if needed
+  // Here assume contract.trade() handles all logic inside (flashloan, swaps)
+  async function executeTrade(tradeInfo) {
+    if (!contract) throw new Error("Contract not initialized");
+
+    // If positiveBalanceToggle is ON, check contract balance before and after trade
+    if (positiveBalanceToggle.checked) {
+      const beforeBal = await contract.getContractBalance();
+      log(`Contract balance before trade: ${ethers.utils.formatUnits(beforeBal, USDC_DECIMALS)} USDC`);
+
+      // Call trade function - if your contract requires params, add here
+      // Example: await contract.trade(tradeInfo.token, tradeInfo.buyRouter, tradeInfo.sellRouter, tradeInfo.amountInRaw);
+      // Assuming trade() function has no params for demo:
+      const tx = await contract.trade({ gasLimit: parseInt(gasLimitInput.value) });
+      log(`Trade tx sent: ${tx.hash}`);
+      await tx.wait();
+      log(`Trade tx mined: ${tx.hash}`);
+
+      const afterBal = await contract.getContractBalance();
+      log(`Contract balance after trade: ${ethers.utils.formatUnits(afterBal, USDC_DECIMALS)} USDC`);
+
+      if (afterBal.lte(beforeBal)) {
+        log("Trade skipped - contract balance did not increase.");
+        return;
+      }
+    } else {
+      // Just call trade() without checks
+      const tx = await contract.trade({ gasLimit: parseInt(gasLimitInput.value) });
+      log(`Trade tx sent: ${tx.hash}`);
+      await tx.wait();
+      log(`Trade tx mined: ${tx.hash}`);
+    }
+  }
+
+  // Withdraw USDC profits from contract
+  async function withdrawUSDC() {
+    if (!contract) return;
+    const amountToWithdrawRaw = await contract.accumulatedProfit();
+    if (amountToWithdrawRaw.isZero()) {
+      alert("No profits to withdraw");
+      return;
+    }
+    try {
+      const tx = await contract.withdraw(amountToWithdrawRaw, { gasLimit: parseInt(gasLimitInput.value) });
+      log(`Withdraw tx sent: ${tx.hash}`);
+      await tx.wait();
+      log(`Withdraw tx mined: ${tx.hash}`);
+      alert("Withdraw successful");
+      await updateBalances();
+    } catch (err) {
+      alert("Withdraw failed: " + err.message);
+      log("Withdraw error: " + err.message);
+    }
+  }
+
+  // Event listeners
+  connectWalletBtn.addEventListener("click", connectWallet);
+  scanNowBtn.addEventListener("click", scanArbitrage);
+  withdrawUSDCBtn.addEventListener("click", withdrawUSDC);
+
+  // Delegate trade button clicks in results table
+  resultsTbody.addEventListener("click", async (event) => {
+    if (event.target && event.target.classList.contains("trade-btn")) {
+      const btn = event.target;
+      const token = btn.getAttribute("data-token");
+      const buyRouter = btn.getAttribute("data-buyrouter");
+      const sellRouter = btn.getAttribute("data-sellrouter");
+      const amount = btn.getAttribute("data-amount");
+
+      log(`Manual trade triggered for token ${token}`);
+      try {
+        await executeTrade({ token, buyRouter, sellRouter, amountInRaw: ethers.BigNumber.from(amount) });
+        await updateBalances();
+      } catch (err) {
+        log(`Manual trade failed: ${err.message}`);
+      }
+    }
+  });
+
+  // Auto scan loop every 10 seconds if toggled
+  setInterval(() => {
+    if (autoTradeToggle.checked) {
+      scanArbitrage().catch(err => log("Auto scan error: " + err.message));
+    }
+  }, 10000);
+
+  // Initial update of balances if MetaMask already connected
+  if (window.ethereum && window.ethereum.selectedAddress) {
+    await connectWallet();
+  }
+
+})();
+</script>
+
+</body>
+</html>
